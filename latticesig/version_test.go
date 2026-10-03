@@ -23,15 +23,18 @@ func TestUnknownVersionRejected(t *testing.T) {
 	copy(corrupt, b)
 	corrupt[5] = payloadVersion + 1
 	fixChecksum(corrupt)
+	if _, err := UnmarshalSignature(corrupt); !errors.Is(err, ErrNewerVersion) {
+		t.Fatalf("expected ErrNewerVersion, got %v", err)
+	}
 	if _, err := UnmarshalSignature(corrupt); !errors.Is(err, ErrUnknownVersion) {
-		t.Fatalf("expected ErrUnknownVersion, got %v", err)
+		t.Fatalf("expected alias ErrUnknownVersion, got %v", err)
 	}
 
 	copy(corrupt, b)
-	corrupt[5] = 0
+	corrupt[5] = 0xFF // signed -1: older than the oldest supported version
 	fixChecksum(corrupt)
-	if _, err := UnmarshalSignature(corrupt); !errors.Is(err, ErrUnknownVersion) {
-		t.Fatalf("expected ErrUnknownVersion for v0, got %v", err)
+	if _, err := UnmarshalSignature(corrupt); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("expected ErrUnsupportedVersion, got %v", err)
 	}
 }
 

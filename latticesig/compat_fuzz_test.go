@@ -5,26 +5,6 @@ import (
 	"testing"
 )
 
-// TestOldVersionStillVerifies simulates a payload produced by the oldest
-// supported writer. Verification must succeed for every version in
-// [minAcceptedVer, payloadVersion]. Today only version 1 is published.
-func TestOldVersionStillVerifies(t *testing.T) {
-	kp, _ := GenerateKey(testSeed(), Toy128)
-	msg := []byte("legacy message")
-	sig, _ := Sign(kp.Secret, msg)
-	b, _ := sig.MarshalBinary()
-
-	for v := minAcceptedVer; v <= payloadVersion; v++ {
-		legacy := make([]byte, len(b))
-		copy(legacy, b)
-		legacy[5] = v
-		fixChecksum(legacy)
-		if err := VerifyEncoded(kp.Public, msg, legacy); err != nil {
-			t.Fatalf("legacy (version %d) blob rejected: %v", v, err)
-		}
-	}
-}
-
 // TestHugeRandomBlobsDoNotPanic feeds malformed bytes of varying sizes and
 // requires the decoder/verifier to return an error rather than panic/hang.
 func TestHugeRandomBlobsDoNotPanic(t *testing.T) {

@@ -9,7 +9,7 @@ type PublicKey struct {
 	aSeed  []byte // seed expanding the public ring element a
 	t      poly   // t = a*s in R_q
 
-	aCache poly // lazily expanded a
+	aCache poly // expanded a, populated once at construction/decode time
 }
 
 // SecretKey is the private half. Retaining the master seed makes signing fully
@@ -37,13 +37,13 @@ func (k *SecretKey) Public() *PublicKey {
 	return k.pub
 }
 
-// ringA returns the expanded public ring element, caching it.
-func (k *PublicKey) ringA() poly {
-	if k.aCache == nil {
-		k.aCache = expandA(k.params, k.aSeed)
-	}
-	return k.aCache
-}
+// ringA returns the expanded public ring element.
+//
+// The expansion is populated exactly once: by GenerateKey / the decoding
+// functions, before the value becomes observable. ringA therefore never
+// mutates the receiver and is safe for concurrent use by arbitrarily many
+// goroutines, including the very first use of a freshly unmarshalled key.
+func (k *PublicKey) ringA() poly { return k.aCache }
 
 // GenerateKey deterministically derives a key pair from a seed.
 //

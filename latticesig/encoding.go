@@ -12,20 +12,23 @@ import (
 //	offset  size  field
 //	0       4     magic "LSG1" (format family)
 //	4       1     kind   (1=public key, 2=secret key, 3=signature)
-//	5       1     ver    payload version
+//	5       1     ver    payload version (compared as signed int8)
 //	6       2     param  parameter-set id (length-prefixed name)
 //	8       4     plen   payload length
 //	12      plen  payload
 //	12+plen 4     checksum = first 4 bytes SHA-256(bytes[0:12+plen])
 //
-// Payload version 1:
+// Payload version 1 (the only version ever produced by the writer):
 //
 //	public key : uint16 aSeedLen || aSeed || 2*N int16 t
 //	secret key : uint16 seedLen  || seed  || 2*N int16 s || embedded public key blob
 //	signature  : 32-byte challenge seed || 2*N int16 z
 //
-// Older payload versions <= payloadVersion are accepted for verification;
-// strictly newer ones yield ErrUnknownVersion.
+// Payload version 0 is a genuinely different historical layout (see
+// legacy_v0.go) accepted for reading and verification. Bytes 0x80..0xFF are
+// interpreted as signed values that predate every released format and are
+// rejected with ErrUnsupportedVersion; versions above payloadVersion yield
+// ErrNewerVersion. Both concrete rejections match ErrUnknownVersion.
 
 const (
 	magic0, magic1, magic2, magic3 = 'L', 'S', 'G', '1'
@@ -33,7 +36,9 @@ const (
 	checksumLen                    = 4
 
 	payloadVersion byte = 1
-	minAcceptedVer byte = 1
+	// minAcceptedVer is the oldest version whose payload layout this build
+	// can parse.
+	minAcceptedVer byte = 0
 
 	kindPublicKey byte = 1
 	kindSecretKey byte = 2
@@ -80,11 +85,13 @@ func decodeBlob(kind byte, blob []byte) (version byte, p *Params, payload []byte
 		}
 	}
 	ver := blob[5]
-	if ver < minAcceptedVer {
-		return 0, nil, nil, ErrUnknownVersion
+	// The version byte is interpreted as signed: 0x00..0x7F are non-negative
+	// versions, 0x80..0xFF are negative (predate every released format).
+	if int8(ver) < int8(minAcceptedVer) {
+		return 0, nil, nil, ErrUnsupportedVersion
 	}
 	if ver > payloadVersion {
-		return 0, nil, nil, ErrUnknownVersion
+		return 0, nil, nil, ErrNewerVersion
 	}
 	params, ok := lookupParams(paramName(be16(blob[6:])))
 	if !ok {
@@ -143,9 +150,12 @@ func (k *PublicKey) MarshalBinary() ([]byte, error) {
 }
 
 func UnmarshalPublicKey(b []byte) (*PublicKey, error) {
-	_, p, payload, err := decodeBlob(kindPublicKey, b)
+	ver, p, payload, err := decodeBlob(kindPublicKey, b)
 	if err != nil {
 		return nil, err
+	}
+	if ver == legacyV0Version {
+		return unmarshalPublicKeyV0(p, payload)
 	}
 	aSeed, rest, ok := readLenPrefixed(payload)
 	if !ok {
@@ -158,7 +168,13 @@ func UnmarshalPublicKey(b []byte) (*PublicKey, error) {
 	if len(aSeed) == 0 {
 		return nil, ErrMalformedEncoding
 	}
-	return &PublicKey{params: p, aSeed: append([]byte(nil), aSeed...), t: t}, nil
+	a := expandA(p, aSeed)
+	return &PublicKey{
+		params: p,
+		aSeed:  append([]byte(nil), aSeed...),
+		t:      t,
+		aCache: a,
+	}, nil
 }
 
 // ----- secret key -----
@@ -186,9 +202,12 @@ func (k *SecretKey) MarshalBinary() ([]byte, error) {
 }
 
 func UnmarshalSecretKey(b []byte) (*SecretKey, error) {
-	_, p, payload, err := decodeBlob(kindSecretKey, b)
+	ver, p, payload, err := decodeBlob(kindSecretKey, b)
 	if err != nil {
 		return nil, err
+	}
+	if ver == legacyV0Version {
+		return unmarshalSecretKeyV0(p, payload)
 	}
 	seed, rest, ok := readLenPrefixed(payload)
 	if !ok || len(seed) < MinSeedLen {
@@ -235,9 +254,12 @@ func (s *Signature) MarshalBinary() ([]byte, error) {
 }
 
 func UnmarshalSignature(b []byte) (*Signature, error) {
-	_, p, payload, err := decodeBlob(kindSignature, b)
+	ver, p, payload, err := decodeBlob(kindSignature, b)
 	if err != nil {
 		return nil, err
+	}
+	if ver == legacyV0Version {
+		return unmarshalSignatureV0(p, payload)
 	}
 	if len(payload) != 32+2*p.N {
 		return nil, ErrMalformedEncoding
