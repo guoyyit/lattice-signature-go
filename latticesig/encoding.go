@@ -18,13 +18,25 @@ import (
 //	12      plen  payload
 //	12+plen 4     checksum = first 4 bytes SHA-256(bytes[0:12+plen])
 //
-// Payload version 1:
+// Payload version 1 (current):
 //
 //	public key : uint16 aSeedLen || aSeed || 2*N int16 t
 //	secret key : uint16 seedLen  || seed  || 2*N int16 s || embedded public key blob
 //	signature  : 32-byte challenge seed || 2*N int16 z
 //
-// Older payload versions <= payloadVersion are accepted for verification;
+// Payload version 0 (legacy, accepted for verification):
+//
+//	public key : 2*N int16 a (full ring element) || 2*N int16 t
+//	secret key : 2*N int16 s || uint16 seedLen || seed || embedded public key blob
+//	signature  : 2*N int16 z || 32-byte challenge seed
+//
+// The v0 public key embeds the expanded ring element a directly (no aSeed),
+// and the v0 signature reverses the z/ch field order. These layouts are
+// genuinely different from v1, not merely the same bytes with a bumped version
+// number. v0 blobs are read-only: they parse and verify/sign, but
+// MarshalBinary always emits the current v1 layout.
+//
+// Older payload versions in [minAcceptedVer, payloadVersion] are accepted;
 // strictly newer ones yield ErrUnknownVersion.
 
 const (
@@ -33,7 +45,7 @@ const (
 	checksumLen                    = 4
 
 	payloadVersion byte = 1
-	minAcceptedVer byte = 1
+	minAcceptedVer byte = 0
 
 	kindPublicKey byte = 1
 	kindSecretKey byte = 2
@@ -134,6 +146,11 @@ func (k *PublicKey) MarshalBinary() ([]byte, error) {
 	if k == nil || k.params == nil {
 		return nil, ErrMalformedEncoding
 	}
+	if len(k.aSeed) == 0 {
+		// v0 keys embed a directly and carry no aSeed; they cannot be
+		// re-marshaled to the current v1 layout.
+		return nil, ErrMalformedEncoding
+	}
 	aLen := len(k.aSeed)
 	payload := make([]byte, 2+aLen+2*k.params.N)
 	put16(payload, uint16(aLen))
@@ -143,9 +160,12 @@ func (k *PublicKey) MarshalBinary() ([]byte, error) {
 }
 
 func UnmarshalPublicKey(b []byte) (*PublicKey, error) {
-	_, p, payload, err := decodeBlob(kindPublicKey, b)
+	ver, p, payload, err := decodeBlob(kindPublicKey, b)
 	if err != nil {
 		return nil, err
+	}
+	if ver == 0 {
+		return unmarshalPublicKeyV0(p, payload)
 	}
 	aSeed, rest, ok := readLenPrefixed(payload)
 	if !ok {
@@ -159,6 +179,25 @@ func UnmarshalPublicKey(b []byte) (*PublicKey, error) {
 		return nil, ErrMalformedEncoding
 	}
 	return &PublicKey{params: p, aSeed: append([]byte(nil), aSeed...), t: t}, nil
+}
+
+// unmarshalPublicKeyV0 decodes a legacy v0 public key payload.
+// v0 layout: 2*N int16 a (full ring element) || 2*N int16 t
+func unmarshalPublicKeyV0(p *Params, payload []byte) (*PublicKey, error) {
+	if len(payload) != 4*p.N {
+		return nil, ErrMalformedEncoding
+	}
+	a, ok := unpackInt16Vec(p, payload[:2*p.N])
+	if !ok {
+		return nil, ErrMalformedEncoding
+	}
+	t, ok := unpackInt16Vec(p, payload[2*p.N:])
+	if !ok {
+		return nil, ErrMalformedEncoding
+	}
+	// v0 embeds a directly: no aSeed. aCache holds the expanded element so
+	// ringA() never needs the seed.
+	return &PublicKey{params: p, aSeed: nil, t: t, aCache: a}, nil
 }
 
 // ----- secret key -----
@@ -186,9 +225,12 @@ func (k *SecretKey) MarshalBinary() ([]byte, error) {
 }
 
 func UnmarshalSecretKey(b []byte) (*SecretKey, error) {
-	_, p, payload, err := decodeBlob(kindSecretKey, b)
+	ver, p, payload, err := decodeBlob(kindSecretKey, b)
 	if err != nil {
 		return nil, err
+	}
+	if ver == 0 {
+		return unmarshalSecretKeyV0(p, payload)
 	}
 	seed, rest, ok := readLenPrefixed(payload)
 	if !ok || len(seed) < MinSeedLen {
@@ -222,6 +264,45 @@ func UnmarshalSecretKey(b []byte) (*SecretKey, error) {
 	}, nil
 }
 
+// unmarshalSecretKeyV0 decodes a legacy v0 secret key payload.
+// v0 layout: 2*N int16 s || uint16 seedLen || seed || 4-byte pubLen || embedded public key blob
+func unmarshalSecretKeyV0(p *Params, payload []byte) (*SecretKey, error) {
+	if len(payload) < 2*p.N+2+4 {
+		return nil, ErrMalformedEncoding
+	}
+	s, ok := unpackInt16Vec(p, payload[:2*p.N])
+	if !ok {
+		return nil, ErrMalformedEncoding
+	}
+	rest := payload[2*p.N:]
+	seed, rest2, ok := readLenPrefixed(rest)
+	if !ok || len(seed) < MinSeedLen {
+		return nil, ErrMalformedEncoding
+	}
+	rest = rest2
+	if len(rest) < 4 {
+		return nil, ErrMalformedEncoding
+	}
+	pubLen := int(binary.BigEndian.Uint32(rest[:4]))
+	rest = rest[4:]
+	if pubLen != len(rest) {
+		return nil, ErrMalformedEncoding
+	}
+	pub, err := UnmarshalPublicKey(rest)
+	if err != nil {
+		return nil, err
+	}
+	if pub.params.Name != p.Name {
+		return nil, ErrUnsupportedParams
+	}
+	return &SecretKey{
+		params: p,
+		seed:   append([]byte(nil), seed...),
+		s:      s,
+		pub:    pub,
+	}, nil
+}
+
 // ----- signature -----
 
 func (s *Signature) MarshalBinary() ([]byte, error) {
@@ -235,9 +316,12 @@ func (s *Signature) MarshalBinary() ([]byte, error) {
 }
 
 func UnmarshalSignature(b []byte) (*Signature, error) {
-	_, p, payload, err := decodeBlob(kindSignature, b)
+	ver, p, payload, err := decodeBlob(kindSignature, b)
 	if err != nil {
 		return nil, err
+	}
+	if ver == 0 {
+		return unmarshalSignatureV0(p, payload)
 	}
 	if len(payload) != 32+2*p.N {
 		return nil, ErrMalformedEncoding
@@ -248,5 +332,20 @@ func UnmarshalSignature(b []byte) (*Signature, error) {
 	if !ok {
 		return nil, ErrMalformedEncoding
 	}
+	return &Signature{params: p, z: z, ch: ch}, nil
+}
+
+// unmarshalSignatureV0 decodes a legacy v0 signature payload.
+// v0 layout: 2*N int16 z || 32-byte challenge seed
+func unmarshalSignatureV0(p *Params, payload []byte) (*Signature, error) {
+	if len(payload) != 2*p.N+32 {
+		return nil, ErrMalformedEncoding
+	}
+	z, ok := unpackInt16Vec(p, payload[:2*p.N])
+	if !ok {
+		return nil, ErrMalformedEncoding
+	}
+	var ch [32]byte
+	copy(ch[:], payload[2*p.N:])
 	return &Signature{params: p, z: z, ch: ch}, nil
 }

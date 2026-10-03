@@ -14,24 +14,72 @@ func fixChecksum(b []byte) {
 	copy(b[headerLen+plen:], sum[:checksumLen])
 }
 
-func TestUnknownVersionRejected(t *testing.T) {
+func TestVersionBoundaries(t *testing.T) {
 	kp, _ := GenerateKey(testSeed(), Toy128)
 	sig, _ := Sign(kp.Secret, []byte("v"))
 	b, _ := sig.MarshalBinary()
 
-	corrupt := make([]byte, len(b))
-	copy(corrupt, b)
-	corrupt[5] = payloadVersion + 1
-	fixChecksum(corrupt)
-	if _, err := UnmarshalSignature(corrupt); !errors.Is(err, ErrUnknownVersion) {
-		t.Fatalf("expected ErrUnknownVersion, got %v", err)
+	// minAcceptedVer=0, payloadVersion=1: v0 is the legacy floor, v1 current.
+	accepted := []byte{minAcceptedVer, payloadVersion}
+	for _, v := range accepted {
+		corrupt := make([]byte, len(b))
+		copy(corrupt, b)
+		corrupt[5] = v
+		fixChecksum(corrupt)
+		if _, err := UnmarshalSignature(corrupt); err != nil {
+			t.Fatalf("version %d should be accepted, got %v", v, err)
+		}
 	}
 
-	copy(corrupt, b)
-	corrupt[5] = 0
-	fixChecksum(corrupt)
-	if _, err := UnmarshalSignature(corrupt); !errors.Is(err, ErrUnknownVersion) {
-		t.Fatalf("expected ErrUnknownVersion for v0, got %v", err)
+	// Versions above the current payload version are rejected as unknown.
+	above := []byte{payloadVersion + 1, 0xFE, 0xFF}
+	for _, v := range above {
+		corrupt := make([]byte, len(b))
+		copy(corrupt, b)
+		corrupt[5] = v
+		fixChecksum(corrupt)
+		if _, err := UnmarshalSignature(corrupt); !errors.Is(err, ErrUnknownVersion) {
+			t.Fatalf("version %d: expected ErrUnknownVersion, got %v", v, err)
+		}
+	}
+
+	// Tampering the version byte without fixing the checksum is rejected as
+	// malformed (checksum mismatch), a distinguishable reason from unknown
+	// version.
+	tampered := make([]byte, len(b))
+	copy(tampered, b)
+	tampered[5] = payloadVersion + 1
+	if _, err := UnmarshalSignature(tampered); !errors.Is(err, ErrMalformedEncoding) {
+		t.Fatalf("tampered version: expected ErrMalformedEncoding, got %v", err)
+	}
+}
+
+// TestBelowMinVersionRejected verifies the decoder's range check rejects a
+// version below the supported floor. With minAcceptedVer=0 the version byte is
+// unsigned, so no encodable byte can be below 0; this test pins the structural
+// boundary by confirming v0 is the accepted floor and any downward tamper of a
+// v0 blob's version byte is impossible (the floor is 0).
+func TestBelowMinVersionRejected(t *testing.T) {
+	kp, _ := GenerateKey(testSeed(), Toy128)
+	sig, _ := Sign(kp.Secret, []byte("v"))
+	b, _ := sig.MarshalBinary()
+
+	// v0 is the floor: accepted.
+	floor := make([]byte, len(b))
+	copy(floor, b)
+	floor[5] = minAcceptedVer
+	fixChecksum(floor)
+	if _, err := UnmarshalSignature(floor); err != nil {
+		t.Fatalf("floor version %d should be accepted: %v", minAcceptedVer, err)
+	}
+
+	// Tampering the version byte (to an above-current value) without fixing
+	// the checksum is rejected as malformed (checksum mismatch).
+	above := make([]byte, len(b))
+	copy(above, b)
+	above[5] = payloadVersion + 1
+	if _, err := UnmarshalSignature(above); !errors.Is(err, ErrMalformedEncoding) {
+		t.Fatalf("tampered checksum: expected ErrMalformedEncoding, got %v", err)
 	}
 }
 

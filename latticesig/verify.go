@@ -23,7 +23,10 @@ func verify(pk *PublicKey, message []byte, sig *Signature) error {
 	if len(sig.z) != p.N {
 		return &VerifyError{Reason: ErrInvalidSignature, Detail: "response polynomial length mismatch"}
 	}
-	if len(pk.t) != p.N || len(pk.aSeed) == 0 {
+	// A public key is complete if both t and the expanded a have the ring
+	// length. v0 keys embed a directly (aSeed=nil, aCache set); v1 keys carry
+	// aSeed and expand a lazily via ringA().
+	if len(pk.t) != p.N || len(pk.ringA()) != p.N {
 		return &VerifyError{Reason: ErrMalformedEncoding, Detail: "public key incomplete"}
 	}
 

@@ -5,23 +5,32 @@ import (
 	"testing"
 )
 
-// TestOldVersionStillVerifies simulates a payload produced by the oldest
-// supported writer. Verification must succeed for every version in
-// [minAcceptedVer, payloadVersion]. Today only version 1 is published.
+// TestOldVersionStillVerifies confirms every version in the accepted range
+// [minAcceptedVer, payloadVersion] parses and verifies. v0 uses the fixed
+// legacy vectors (genuine old layout); v1 uses the current encoder.
 func TestOldVersionStillVerifies(t *testing.T) {
+	msg := []byte("legacy interop message")
+
+	// v0: fixed legacy vectors.
+	pk0, err := UnmarshalPublicKey(v0PubVector)
+	if err != nil {
+		t.Fatalf("v0 pub: %v", err)
+	}
+	if err := VerifyEncoded(pk0, msg, v0SigVector); err != nil {
+		t.Fatalf("v0 blob rejected: %v", err)
+	}
+
+	// v1: current encoder.
 	kp, _ := GenerateKey(testSeed(), Toy128)
-	msg := []byte("legacy message")
 	sig, _ := Sign(kp.Secret, msg)
 	b, _ := sig.MarshalBinary()
+	if err := VerifyEncoded(kp.Public, msg, b); err != nil {
+		t.Fatalf("v1 blob rejected: %v", err)
+	}
 
-	for v := minAcceptedVer; v <= payloadVersion; v++ {
-		legacy := make([]byte, len(b))
-		copy(legacy, b)
-		legacy[5] = v
-		fixChecksum(legacy)
-		if err := VerifyEncoded(kp.Public, msg, legacy); err != nil {
-			t.Fatalf("legacy (version %d) blob rejected: %v", v, err)
-		}
+	// The accepted range is exactly {0, 1}.
+	if minAcceptedVer != 0 || payloadVersion != 1 {
+		t.Fatalf("unexpected version range [%d, %d]", minAcceptedVer, payloadVersion)
 	}
 }
 

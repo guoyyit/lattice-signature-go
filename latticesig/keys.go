@@ -1,5 +1,7 @@
 package latticesig
 
+import "sync"
+
 // MinSeedLen is the minimum accepted master-seed length in bytes.
 const MinSeedLen = 16
 
@@ -9,7 +11,8 @@ type PublicKey struct {
 	aSeed  []byte // seed expanding the public ring element a
 	t      poly   // t = a*s in R_q
 
-	aCache poly // lazily expanded a
+	aOnce  sync.Once // guards lazy expansion of aCache
+	aCache poly      // lazily expanded a
 }
 
 // SecretKey is the private half. Retaining the master seed makes signing fully
@@ -37,11 +40,16 @@ func (k *SecretKey) Public() *PublicKey {
 	return k.pub
 }
 
-// ringA returns the expanded public ring element, caching it.
+// ringA returns the expanded public ring element, caching it. The first call
+// expands a exactly once; concurrent callers block until the expansion is
+// complete and then share the result. This makes a restored public key safe for
+// immediate concurrent verification with no warming call.
 func (k *PublicKey) ringA() poly {
-	if k.aCache == nil {
-		k.aCache = expandA(k.params, k.aSeed)
-	}
+	k.aOnce.Do(func() {
+		if k.aCache == nil {
+			k.aCache = expandA(k.params, k.aSeed)
+		}
+	})
 	return k.aCache
 }
 
